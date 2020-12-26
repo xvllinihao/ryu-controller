@@ -25,7 +25,7 @@ def multiControllerNet():
 	s5 = net.addSwitch("s5")
 	s6 = net.addSwitch("s6")
 	print("*** Creating hosts")
-	
+
 	h1 = net.addHost("h1",mac="00:00:00:00:00:01",ip="192.168.1.1/16")
 	h2 = net.addHost("h2",mac="00:00:00:00:00:02",ip="192.168.1.2/16")
 	h3 = net.addHost("h3",mac="00:00:00:00:00:03",ip="192.168.1.3/16")
@@ -53,7 +53,9 @@ def multiControllerNet():
 
 	print("*** Creating intra links of switch2switch.")
 	net.addLink(s1, s3)
-	net.addLink(s3, s5)
+	net.addLink(s3, s4)
+	net.addLink(s4, s5)
+	#net.addLink(s3, s5)
 	net.addLink(s1, s5)
 	#net.addLink(s1, s2)
 	#net.addLink(s2, s3)
