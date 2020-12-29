@@ -680,7 +680,6 @@ class OFPMatch(StringifyMixin):
         ('2001:db8:bd05:1d2:288a:1fc0:1:10ee', 'ffff:ffff:ffff:ffff::')
 
     .. Note::
-
         For the list of the supported Nicira experimenter matches,
         please refer to :ref:`ryu.ofproto.nx_match <nx_match_structures>`.
 

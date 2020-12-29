@@ -10,7 +10,7 @@ from ryu.lib.packet import ether_types
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
 from ryu.ofproto import ofproto_v1_3
-from ryu.topology import event,switches
+from ryu.topology import event
 
 import ryu.topology.switches as myswitch
 
@@ -18,6 +18,9 @@ ARP = arp.arp.__name__
 ETHERNET = ethernet.ethernet.__name__
 ETHERNET_MULTICAST = "ff:ff:ff:ff:ff:ff"
 DELETE_SWITCH = "delete_switch"
+TOPO_UPDATE_INFO = 2333
+OFPPR_DELETE = 1
+
 
 class myswitch13(app_manager.RyuApp):
     # set openflow protocol
@@ -30,97 +33,7 @@ class myswitch13(app_manager.RyuApp):
         self.switch2_port = {}  # switch to switch port
         self.arp_table = {}  # received arp_table
         self.switches = []
-
-
-    @set_ev_cls(event.EventSwitchEnter, CONFIG_DISPATCHER)
-    def _switch_enter_handler(self, ev):
-        datapath = ev.switch.dp
-        self.switches.append(datapath)
-        # ofproto = datapath.ofproto
-        # parser = datapath.ofproto_parser
-
-        for switch in self.switches:
-            for port in switch.ports.keys():
-                lldp_data = myswitch.LLDPPacket.lldp_packet(switch.id, port, 1, 1)
-                actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                out = switch.ofproto_parser.OFPPacketOut(
-                    datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                    buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                    data=lldp_data)
-                switch.send_msg(out)
-
-    @set_ev_cls(event.EventSwitchLeave, CONFIG_DISPATCHER)
-    def _switch_leave_handler(self, ev):
-        datapath = ev.switch.dp
-        # self.switches.append(datapath)
-        # ofproto = datapath.ofproto
-        # parser = datapath.ofproto_parser
-        self.switches.remove(datapath)
-
-        for switch in self.switches:
-            for port in switch.ports.keys():
-                lldp_data = myswitch.LLDPPacket.lldp_packet(datapath.id, 2333, 1, 1, DELETE_SWITCH)
-                actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                out = switch.ofproto_parser.OFPPacketOut(
-                    datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                    buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                    data=lldp_data)
-                switch.send_msg(out)
-
-    @set_ev_cls(ofp_event.EventOFPPortStateChange, CONFIG_DISPATCHER)
-    def e_o_p_c(self, ev):
-        pass
-
-    @set_ev_cls(ofp_event.EventOFPStateChange, CONFIG_DISPATCHER)
-    def e_o_p_c(self, ev):
-        pass
-
-
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        # install table miss from switch to controller
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
-
-    @set_ev_cls(event.EventHostAdd, CONFIG_DISPATCHER)
-    def _host_add_handler(self,ev):
-        pass
-
-    @set_ev_cls(event.EventHostDelete, CONFIG_DISPATCHER)
-    def _host_delete_handler(self, ev):
-        datapath = ev.switch.dp
-        # self.switches.append(datapath)
-        # ofproto = datapath.ofproto
-        # parser = datapath.ofproto_parser
-        # self.switches.remove(datapath)
-
-        for switch in self.switches:
-            for port in switch.ports.keys():
-                lldp_data = myswitch.LLDPPacket.lldp_packet(datapath.id, 2333, 1, 1, DELETE_SWITCH)
-                actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                out = switch.ofproto_parser.OFPPacketOut(
-                    datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                    buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                    data=lldp_data)
-                switch.send_msg(out)
-
-    @set_ev_cls(event.EventLinkAdd, CONFIG_DISPATCHER)
-    def _link_add_handler(self, ev):
-        pass
-
-    @set_ev_cls(event.EventLinkDelete, CONFIG_DISPATCHER)
-    def _link_delete_handler(self, ev):
-        pass
-
-
-
-
+        self.port_to_switch = defaultdict(dict)  # record the port which connects a switch
 
     # add table miss
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
@@ -137,6 +50,243 @@ class myswitch13(app_manager.RyuApp):
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                     match=match, instructions=inst)
         datapath.send_msg(mod)
+
+    def delete_flow(self, datapath, target):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        for dst in self.mac_to_port[target].keys():
+            match = parser.OFPMatch(eth_dst=dst)
+            mod = parser.OFPFlowMod(
+                datapath, command=ofproto.OFPFC_DELETE,
+                out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY,
+                priority=1, match=match)
+            datapath.send_msg(mod)
+
+    def send_lldp(self, send_port, src_dpid, src_port, switch, topology=None):
+        if not topology:
+            lldp_data = myswitch.LLDPPacket.lldp_packet(src_dpid, src_port, 1, 1)
+        else:
+            lldp_data = myswitch.LLDPPacket.lldp_packet(src_dpid, src_port, 1, 1, topology)
+
+        actions = [switch.ofproto_parser.OFPActionOutput(send_port)]
+        out = switch.ofproto_parser.OFPPacketOut(
+            datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
+            buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
+            data=lldp_data)
+        switch.send_msg(out)
+
+    def lldp_handler(self, msg, datapath):
+        flag = False  # mark whether topology is updated
+        infos = myswitch.LLDPPacket.lldp_parse(msg.data)
+        src_dpid, src_port_no = infos[0], infos[1]
+
+        # deal with delete
+        if len(infos) == 3 and infos[2].tlv_info == DELETE_SWITCH:
+            if self.net.has_node(src_dpid):
+                if self.net.has_node(src_dpid):
+                    self.net.remove_node(src_dpid)
+                    # self.delete_flow(datapath, src_dpid)
+                    print "delete node ", src_dpid, "current topo", self.net.edges
+
+                for switch in self.switches:
+                    for port in switch.ports.keys():
+                        self.send_lldp(port, src_dpid, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
+            return
+
+        # new switch come to network
+        if src_port_no != TOPO_UPDATE_INFO:
+            dst_dpid, dst_port_no = datapath.id, msg.match['in_port']
+            # add switch to switch link
+            if not self.net.has_edge(src_dpid, dst_dpid):
+                flag = True
+            self.net.add_edge(src_dpid, dst_dpid, src_port=src_port_no, dst_port=dst_port_no)
+            self.net.add_edge(dst_dpid, src_dpid, src_port=dst_port_no, dst_port=src_port_no)
+
+            # record the port and its connected switch
+            self.port_to_switch[dst_dpid][dst_port_no] = src_dpid
+            self.port_to_switch[src_dpid][src_port_no] = dst_dpid
+
+            print "add new edges normal", src_dpid, dst_dpid, src_port_no, dst_port_no, self.net.edges
+
+            # add switch to switch port
+            if self.switch2_port.has_key(dst_dpid):
+                self.switch2_port[dst_dpid].add(dst_port_no)
+            else:
+                self.switch2_port[dst_dpid] = {dst_port_no}
+
+            if self.switch2_port.has_key(src_dpid):
+                self.switch2_port[src_dpid].add(src_port_no)
+            else:
+                self.switch2_port[src_dpid] = {src_port_no}
+
+        if len(infos) == 3:
+            src_topo = infos[2].tlv_info.split("+")
+            for edge in src_topo:
+                nodes = edge.split(',')
+                in_node = eval(nodes[0][1:])
+                out_node = eval(nodes[1][1:-1])
+                if not self.net.has_edge(in_node, out_node):
+                    self.net.add_edge(in_node, out_node)
+                    flag = True
+        if flag:
+            topology = "+".join(str(edge) for edge in list(self.net.edges))
+            # print "add new edges", self.net.edges
+            for switch in self.switches:
+                for port in switch.ports.keys():
+                    # lldp_data = myswitch.LLDPPacket.lldp_packet(switch.id, port, 1, 1, topology)
+                    # actions = [switch.ofproto_parser.OFPActionOutput(port)]
+                    # out = switch.ofproto_parser.OFPPacketOut(
+                    #     datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
+                    #     buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
+                    #     data=lldp_data)
+                    # switch.send_msg(out)
+                    self.send_lldp(port, switch.id, port, switch, topology)
+
+    def arp_handler(self, datapath, dpid, eth, in_port, msg, ofproto, parser, pkt):
+        dst = eth.dst
+        src = eth.src
+        # discard the ARP packege received for the second time
+        header_list = dict((p.protocol_name, p) for p in pkt.protocols if type(p) != str)
+        if dst == ETHERNET_MULTICAST and ARP in header_list:
+            arp_dst_ip = header_list[ARP].dst_ip
+            # this ARP has been recieved before
+            if (dpid, src, arp_dst_ip) in self.arp_table:
+                # it comes from a different port this time, discard it
+                if self.arp_table[(dpid, src, arp_dst_ip)] != in_port:
+                    out = parser.OFPPacketOut(datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER,
+                                              in_port=in_port, actions=[], data=None)
+                    datapath.send_msg(out)
+                    return
+            else:
+                # record it if it is received for the first time
+                self.arp_table[(dpid, src, arp_dst_ip)] = in_port
+        # record the port which the packet should be transffered to
+        self.mac_to_port.setdefault(dpid, {})
+        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+        # learn a mac address to avoid FLOOD next time.
+        self.mac_to_port[dpid][src] = in_port
+        # find the port
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
+        # Add the link between the host and it's switch
+        if src not in self.net and in_port not in self.switch2_port[dpid]:
+            self.net.add_edge(src, dpid, src_port=-1, dst_port=in_port)
+            self.net.add_edge(dpid, src, src_port=in_port, dst_port=-1)
+            print "host link added"
+            print src, dpid
+            print "add new edges", self.net.edges
+            topology = "+".join(str(edge) for edge in list(self.net.edges))
+            self.send_lldp(ofproto.OFPP_FLOOD, dpid, TOPO_UPDATE_INFO, datapath, topology)
+        # if the destination in the local network, find the shortest path
+        if src in self.net and dst in self.net and dpid in self.net:
+            path = nx.shortest_path(self.net, src, dst)  # compute the shortest path
+            if dpid not in path:
+                return
+            next = path[path.index(dpid) + 1]
+            print "dpid and next ", dpid, next  # get next hop
+            out_port = self.net[dpid][next]['src_port']  # get output port
+            self.mac_to_port[dpid][dst] = out_port
+
+            # arrived in the destination switch, output the path
+            if next == dst and dpid == path[-2]:
+                print "path:", src, "->", dst
+                print "the length of the path {}".format(len(path))
+                print path
+                print "\n"
+        actions = [parser.OFPActionOutput(out_port)]
+        # install a flow to avoid packet_in next time
+        if out_port != ofproto.OFPP_FLOOD:
+            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+            # verify if we have a valid buffer_id, if yes avoid to send both
+            # flow_mod & packet_out
+            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                return
+            else:
+                self.add_flow(datapath, 1, match, actions)
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                  in_port=in_port, actions=actions, data=data)
+        datapath.send_msg(out)
+
+    @set_ev_cls(event.EventSwitchEnter, CONFIG_DISPATCHER)
+    def _switch_enter_handler(self, ev):
+        datapath = ev.switch.dp
+        self.switches.append(datapath)
+
+        for port in datapath.ports.keys():
+            self.send_lldp(port, datapath.id, port, datapath)
+            # lldp_data = myswitch.LLDPPacket.lldp_packet(datapath.id, port, 1, 1)
+            # actions = [datapath.ofproto_parser.OFPActionOutput(port)]
+            # out = datapath.ofproto_parser.OFPPacketOut(
+            #     datapath=datapath, in_port=datapath.ofproto.OFPP_CONTROLLER,
+            #     buffer_id=datapath.ofproto.OFP_NO_BUFFER, actions=actions,
+            #     data=lldp_data)
+            # datapath.send_msg(out)
+
+    @set_ev_cls(event.EventSwitchLeave, DEAD_DISPATCHER)
+    def _switch_leave_handler(self, ev):
+        datapath = ev.switch.dp
+        self.switches.remove(datapath)
+
+    @set_ev_cls(ofp_event.EventOFPPortStateChange, CONFIG_DISPATCHER)
+    def e_o_p_c(self, ev):
+        pass
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, CONFIG_DISPATCHER)
+    def e_o_p_c(self, ev):
+        pass
+
+    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
+    def port_status_handler(self, ev):
+        dp = ev.msg.datapath.id
+        reason = ev.msg.reason
+        if reason == OFPPR_DELETE:  #
+            leave_port = ev.msg.desc.port_no
+            leave_switch = self.port_to_switch[dp][leave_port]
+            # self.delete_flow(ev.msg.datapath,leave_switch)
+
+            if self.net.has_node(leave_switch):
+                self.net.remove_node(leave_switch)
+                print "delete node ", leave_switch, "current topo", self.net.edges
+
+            for switch in self.switches:
+                for port in switch.ports.keys():
+                    self.send_lldp(port, leave_switch, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
+
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # install table miss from switch to controller
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                          ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 0, match, actions)
+
+    @set_ev_cls(event.EventHostAdd, CONFIG_DISPATCHER)
+    def _host_add_handler(self, ev):
+        pass
+
+    @set_ev_cls(event.EventHostDelete, CONFIG_DISPATCHER)
+    def _host_delete_handler(self, ev):
+        datapath = ev.switch.dp
+        pass
+
+    @set_ev_cls(event.EventLinkAdd, CONFIG_DISPATCHER)
+    def _link_add_handler(self, ev):
+        pass
+
+    @set_ev_cls(event.EventLinkDelete, CONFIG_DISPATCHER)
+    def _link_delete_handler(self, ev):
+        pass
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -155,171 +305,7 @@ class myswitch13(app_manager.RyuApp):
 
         # parse lldp packet to get topology
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            flag = False
-            infos = myswitch.LLDPPacket.lldp_parse(msg.data)
-            src_dpid, src_port_no = infos[0], infos[1]
-            if len(infos)==3 and infos[2] == DELETE_SWITCH:
-                if self.net.has_node(src_dpid):
-                    self.net.remove_node(src_dpid)
-                    for switch in self.switches:
-                        for port in switch.ports.keys():
-                            lldp_data = myswitch.LLDPPacket.lldp_packet(src_dpid, 2333, 1, 1, infos[2])
-                            actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                            out = switch.ofproto_parser.OFPPacketOut(
-                                datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                                buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                                data=lldp_data)
-                            switch.send_msg(out)
-                return
-            # if src_port_no != 2333:
-            dst_dpid, dst_port_no = datapath.id, msg.match['in_port']
-            # add switch to switch link
-            if not self.net.has_edge(src_dpid,dst_dpid):
-                flag = True
-            self.net.add_edge(src_dpid, dst_dpid, src_port=src_port_no, dst_port=dst_port_no)
-            # self.net.add_edge(dst_dpid, src_dpid, src_port=dst_port_no, dst_port=src_port_no)
-            print "add new edges normal", src_dpid, dst_dpid, src_port_no, dst_port_no, self.net.edges
-                # # if not self.net.has_edge(src_dpid,dst_dpid):
-                # topology = "+".join(str(edge) for edge in list(self.net.edges))
-                # # topology = list(self.net.edges)
-                # lldp_data = myswitch.LLDPPacket.lldp_packet(
-                #     dpid, in_port, 1, 23333, topology)
-                # actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-                # out = parser.OFPPacketOut(
-                #     datapath=datapath, in_port=ofproto.OFPP_CONTROLLER,
-                #     buffer_id=ofproto.OFP_NO_BUFFER, actions=actions,
-                #     data=lldp_data)
-                # datapath.send_msg(out)
+            self.lldp_handler(msg, datapath)
 
-
-            # add switch to switch port
-            if self.switch2_port.has_key(dst_dpid):
-                self.switch2_port[dst_dpid].add(dst_port_no)
-            else:
-                self.switch2_port[dst_dpid] = {dst_port_no}
-
-            if self.switch2_port.has_key(src_dpid):
-                self.switch2_port[src_dpid].add(src_port_no)
-            else:
-                self.switch2_port[src_dpid] = {src_port_no}
-            # print "topology update:"
-            # print src_dpid, dst_dpid
-            # print self.net.edges()
-            # return
-        # else:
-
-
-            if len(infos)==3:
-                src_topo = infos[2].tlv_info.split("+")
-                for edge in src_topo:
-                    nodes = edge.split(',')
-                    in_node = eval(nodes[0][1:])
-                    out_node = eval(nodes[1][1:-1])
-                    if not self.net.has_edge(in_node, out_node):
-                        self.net.add_edge(in_node, out_node )
-                        flag = True
-            if flag:
-                topology = "+".join(str(edge) for edge in list(self.net.edges))
-                # print "add new edges", self.net.edges
-                for switch in self.switches:
-                    for port in switch.ports.keys():
-                        lldp_data = myswitch.LLDPPacket.lldp_packet(switch.id, port, 1, 1, topology)
-                        actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                        out = switch.ofproto_parser.OFPPacketOut(
-                            datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                            buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                            data=lldp_data)
-                        switch.send_msg(out)
-            return
-
-
-
-        dst = eth.dst
-        src = eth.src
-
-        # discard the ARP packege received for the second time
-        header_list = dict((p.protocol_name, p) for p in pkt.protocols if type(p) != str)
-        if dst == ETHERNET_MULTICAST and ARP in header_list:
-            arp_dst_ip = header_list[ARP].dst_ip
-            # this ARP has been recieved before
-            if (dpid, src, arp_dst_ip) in self.arp_table:
-                # it comes from a different port this time, discard it
-                if self.arp_table[(dpid, src, arp_dst_ip)] != in_port:
-                    out = parser.OFPPacketOut(datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER,
-                                              in_port=in_port, actions=[], data=None)
-                    datapath.send_msg(out)
-                    return
-            else:
-                # record it if it is received for the first time
-                self.arp_table[(dpid, src, arp_dst_ip)] = in_port
-
-        # record the port which the packet should be transffered to
-        self.mac_to_port.setdefault(dpid, {})
-
-        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
-
-        # learn a mac address to avoid FLOOD next time.
-        self.mac_to_port[dpid][src] = in_port
-
-        # find the port
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
         else:
-            out_port = ofproto.OFPP_FLOOD
-
-        # Add the link between the host and it's switch
-        if src not in self.net and in_port not in self.switch2_port[dpid]:
-            self.net.add_edge(src, dpid, src_port=-1, dst_port=in_port)
-            self.net.add_edge(dpid, src, src_port=in_port, dst_port=-1)
-            print "host link added"
-            print src, dpid
-            print "add new edges", self.net.edges
-            topology = "+".join(str(edge) for edge in list(self.net.edges))
-            # topology = list(self.net.edges)
-            lldp_data = myswitch.LLDPPacket.lldp_packet(
-                2333, 2333, 1, 23333, topology)
-            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-            out = parser.OFPPacketOut(
-                datapath=datapath, in_port=ofproto.OFPP_CONTROLLER,
-                buffer_id=ofproto.OFP_NO_BUFFER, actions=actions,
-                data=lldp_data)
-            datapath.send_msg(out)
-
-
-        # if the destination in the local network, find the shortest path
-        if src in self.net and dst in self.net and dpid in self.net:
-            path = nx.shortest_path(self.net, src, dst)  # compute the shortest path
-            if dpid not in path:
-                return
-            next = path[path.index(dpid) + 1]
-            print "dpid and next ", dpid, next# get next hop
-            out_port = self.net[dpid][next]['src_port']  # get output port
-            self.mac_to_port[dpid][dst] = out_port
-
-            # arrived in the destination switch, output the path
-            if next == dst and dpid == path[-2]:
-                print "path:", src, "->", dst
-                print "the length of the path {}".format(len(path))
-                print path
-                print "\n"
-
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            # verify if we have a valid buffer_id, if yes avoid to send both
-            # flow_mod & packet_out
-            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                return
-            else:
-                self.add_flow(datapath, 1, match, actions)
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
-
+            self.arp_handler(datapath, dpid, eth, in_port, msg, ofproto, parser, pkt)
