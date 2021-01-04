@@ -184,12 +184,12 @@ class myswitch13(app_manager.RyuApp):
         if flag:
             # update flow table
             # self.update_flow(datapath, msg)
-
             topology = "+".join(str(edge) for edge in list(self.net.edges))
             # print "add new edges", self.net.edges
             for switch in self.switches:
                 for port in switch.ports.keys():
                     self.send_lldp(port, switch.id, port, switch, topology)
+                    # self.send_lldp(port, switch.id, TOPO_UPDATE_INFO, switch, topology)
 
     def arp_handler(self, datapath, dpid, eth, in_port, msg, ofproto, parser, pkt):
         dst = eth.dst
@@ -225,9 +225,15 @@ class myswitch13(app_manager.RyuApp):
             self.net.add_edge(dpid, src, src_port=in_port, dst_port=-1)
             print "host link added"
             print src, dpid
-            print "add new edges", self.net.edges
+            print "add new host", self.net.edges
             topology = "+".join(str(edge) for edge in list(self.net.edges))
-            self.send_lldp(ofproto.OFPP_FLOOD, dpid, TOPO_UPDATE_INFO, datapath, topology)
+
+            print "send new topo", topology
+            # self.send_lldp(ofproto.OFPP_FLOOD, dpid, TOPO_UPDATE_INFO, datapath, topology)
+            for switch in self.switches:
+                for port in switch.ports.keys():
+                    self.send_lldp(port, switch.id, TOPO_UPDATE_INFO, switch, topology)
+
         # if the destination in the local network, find the shortest path
         if src in self.net and dst in self.net and dpid in self.net:
             path = nx.shortest_path(self.net, src, dst)  # compute the shortest path
