@@ -105,7 +105,6 @@ class myswitch13(app_manager.RyuApp):
                 print e
                 pass
 
-
     def send_lldp(self, send_port, src_dpid, src_port, switch, topology=None):
         if not topology:
             lldp_data = myswitch.LLDPPacket.lldp_packet(src_dpid, src_port, 1, 1)
@@ -176,9 +175,6 @@ class myswitch13(app_manager.RyuApp):
                     flag = True
                 if type(in_node) == str or type(out_node) == str:
                     self.update_flow(datapath, msg)
-
-
-
 
         #send logic
         if flag:
