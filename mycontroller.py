@@ -1,4 +1,5 @@
 from collections import defaultdict
+from itertools import permutations
 
 import networkx as nx
 from ryu.base import app_manager
@@ -51,17 +52,59 @@ class myswitch13(app_manager.RyuApp):
                                     match=match, instructions=inst)
         datapath.send_msg(mod)
 
-    def delete_flow(self, datapath, target):
+    def delete_flow(self, datapath):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        if datapath.id not in self.mac_to_port.keys():
+            return
 
-        for dst in self.mac_to_port[target].keys():
+        for dst in self.mac_to_port[datapath.id].keys():
             match = parser.OFPMatch(eth_dst=dst)
             mod = parser.OFPFlowMod(
                 datapath, command=ofproto.OFPFC_DELETE,
                 out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY,
                 priority=1, match=match)
             datapath.send_msg(mod)
+
+    def update_flow(self, datapath, msg):
+        dpid = datapath.id
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        self.delete_flow(datapath)
+        alive_hosts = []
+        for node in self.net.nodes:
+            if type(node) == str:
+                alive_hosts.append(node)
+        links = permutations(alive_hosts, 2)
+        for link in links:
+            src = link[0]
+            dst = link[1]
+            try:
+                path = nx.shortest_path(self.net, src, dst)
+                if dpid not in path:
+                    continue
+                previous = path[path.index(dpid) - 1]
+                next = path[path.index(dpid) + 1]
+                in_port = self.net[previous][dpid]["dst_port"]
+                out_port = self.net[dpid][next]["src_port"]
+                self.mac_to_port[dpid][dst] = out_port
+                actions = [parser.OFPActionOutput(out_port)]
+                # install a flow to avoid packet_in next time
+                if out_port != ofproto.OFPP_FLOOD:
+                    match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+                    # verify if we have a valid buffer_id, if yes avoid to send both
+                    # flow_mod & packet_out
+                    # if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+                    #     self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+                    #     return
+                    # else:
+                    #     self.add_flow(datapath, 1, match, actions)
+                    self.add_flow(datapath, 1, match, actions)
+            except Exception as e:
+                print e
+                pass
+
 
     def send_lldp(self, send_port, src_dpid, src_port, switch, topology=None):
         if not topology:
@@ -87,11 +130,12 @@ class myswitch13(app_manager.RyuApp):
                 if self.net.has_node(src_dpid):
                     self.net.remove_node(src_dpid)
                     # self.delete_flow(datapath, src_dpid)
-                    print "delete node ", src_dpid, "current topo", self.net.edges
+                    print "delete node ", src_dpid, "current topo", self.net.edges, " current nodes ", self.net.nodes
 
                 for switch in self.switches:
                     for port in switch.ports.keys():
                         self.send_lldp(port, src_dpid, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
+            self.update_flow(datapath, msg)
             return
 
         # new switch come to network
@@ -120,6 +164,7 @@ class myswitch13(app_manager.RyuApp):
             else:
                 self.switch2_port[src_dpid] = {src_port_no}
 
+        #update the topo
         if len(infos) == 3:
             src_topo = infos[2].tlv_info.split("+")
             for edge in src_topo:
@@ -129,18 +174,21 @@ class myswitch13(app_manager.RyuApp):
                 if not self.net.has_edge(in_node, out_node):
                     self.net.add_edge(in_node, out_node)
                     flag = True
+                if type(in_node) == str or type(out_node) == str:
+                    self.update_flow(datapath, msg)
+
+
+
+
+        #send logic
         if flag:
+            # update flow table
+            # self.update_flow(datapath, msg)
+
             topology = "+".join(str(edge) for edge in list(self.net.edges))
             # print "add new edges", self.net.edges
             for switch in self.switches:
                 for port in switch.ports.keys():
-                    # lldp_data = myswitch.LLDPPacket.lldp_packet(switch.id, port, 1, 1, topology)
-                    # actions = [switch.ofproto_parser.OFPActionOutput(port)]
-                    # out = switch.ofproto_parser.OFPPacketOut(
-                    #     datapath=switch, in_port=switch.ofproto.OFPP_CONTROLLER,
-                    #     buffer_id=switch.ofproto.OFP_NO_BUFFER, actions=actions,
-                    #     data=lldp_data)
-                    # switch.send_msg(out)
                     self.send_lldp(port, switch.id, port, switch, topology)
 
     def arp_handler(self, datapath, dpid, eth, in_port, msg, ofproto, parser, pkt):
@@ -221,13 +269,6 @@ class myswitch13(app_manager.RyuApp):
 
         for port in datapath.ports.keys():
             self.send_lldp(port, datapath.id, port, datapath)
-            # lldp_data = myswitch.LLDPPacket.lldp_packet(datapath.id, port, 1, 1)
-            # actions = [datapath.ofproto_parser.OFPActionOutput(port)]
-            # out = datapath.ofproto_parser.OFPPacketOut(
-            #     datapath=datapath, in_port=datapath.ofproto.OFPP_CONTROLLER,
-            #     buffer_id=datapath.ofproto.OFP_NO_BUFFER, actions=actions,
-            #     data=lldp_data)
-            # datapath.send_msg(out)
 
     @set_ev_cls(event.EventSwitchLeave, DEAD_DISPATCHER)
     def _switch_leave_handler(self, ev):
@@ -253,11 +294,12 @@ class myswitch13(app_manager.RyuApp):
 
             if self.net.has_node(leave_switch):
                 self.net.remove_node(leave_switch)
-                print "delete node ", leave_switch, "current topo", self.net.edges
+                print "delete node ", leave_switch, "current topo", self.net.edges, " current nodes ", self.net.nodes
 
             for switch in self.switches:
                 for port in switch.ports.keys():
                     self.send_lldp(port, leave_switch, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
+            self.update_flow(ev.msg.datapath, ev.msg)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -295,6 +337,9 @@ class myswitch13(app_manager.RyuApp):
                               ev.msg.msg_len, ev.msg.total_len)
         msg = ev.msg
         datapath = msg.datapath
+        if datapath not in self.switches:
+            return
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
