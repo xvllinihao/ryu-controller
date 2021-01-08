@@ -2,8 +2,10 @@
 
 **functions**:
 
-1.get topology of local network
+1.get topology of the whole network
 
-2.avoid broadcast storm
+2.find the shortest path to forward the packet
 
-3.shortestpath in local network
+2.avoid repeated forwarding in the loop
+
+
