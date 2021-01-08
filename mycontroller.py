@@ -31,12 +31,11 @@ class myswitch13(app_manager.RyuApp):
         super(myswitch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {}  # mac address table,other network's host's direction
         self.net = nx.DiGraph()  # topology
-        self.switch2_port = {}  # switch to switch port
         self.arp_table = {}  # received arp_table
-        self.switches = []
+        self.switches = []  # switches under control
         self.port_to_switch = defaultdict(dict)  # record the port which connects a switch
 
-    # add table miss
+    # install flow entry
     def add_flow(self, datapath, priority, match, actions, buffer_id=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -52,12 +51,14 @@ class myswitch13(app_manager.RyuApp):
                                     match=match, instructions=inst)
         datapath.send_msg(mod)
 
+    # delete all the flow entries except table miss entry of a switch according to datapath
     def delete_flow(self, datapath):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         if datapath.id not in self.mac_to_port.keys():
             return
 
+        # TODO: delete this loop, no need to match the dst
         for dst in self.mac_to_port[datapath.id].keys():
             match = parser.OFPMatch(eth_dst=dst)
             mod = parser.OFPFlowMod(
@@ -66,21 +67,26 @@ class myswitch13(app_manager.RyuApp):
                 priority=1, match=match)
             datapath.send_msg(mod)
 
+    # updte all the flow entries of a switch according to datapath
     def update_flow(self, datapath, msg):
         dpid = datapath.id
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+        # clear the table first
         self.delete_flow(datapath)
+        # find all the alive hosts connected to the switch
         alive_hosts = []
         for node in self.net.nodes:
             if type(node) == str:
                 alive_hosts.append(node)
+        # enumerate all the links between hosts
         links = permutations(alive_hosts, 2)
         for link in links:
             src = link[0]
             dst = link[1]
             try:
+                # find the shortest path
                 path = nx.shortest_path(self.net, src, dst)
                 if dpid not in path:
                     continue
@@ -90,7 +96,7 @@ class myswitch13(app_manager.RyuApp):
                 out_port = self.net[dpid][next]["src_port"]
                 self.mac_to_port[dpid][dst] = out_port
                 actions = [parser.OFPActionOutput(out_port)]
-                # install a flow to avoid packet_in next time
+                # install a flow
                 if out_port != ofproto.OFPP_FLOOD:
                     match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
                     # verify if we have a valid buffer_id, if yes avoid to send both
@@ -105,7 +111,10 @@ class myswitch13(app_manager.RyuApp):
                 print e
                 pass
 
+    # function used to send lldp packet
+
     def send_lldp(self, send_port, src_dpid, src_port, switch, topology=None):
+        # construct lldp packet according to given information
         if not topology:
             lldp_data = myswitch.LLDPPacket.lldp_packet(src_dpid, src_port, 1, 1)
         else:
@@ -118,24 +127,41 @@ class myswitch13(app_manager.RyuApp):
             data=lldp_data)
         switch.send_msg(out)
 
+    # handle reveived lldp packet
     def lldp_handler(self, msg, datapath):
         flag = False  # mark whether topology is updated
         infos = myswitch.LLDPPacket.lldp_parse(msg.data)
         src_dpid, src_port_no = infos[0], infos[1]
 
-        # deal with delete
-        if len(infos) == 3 and infos[2].tlv_info == DELETE_SWITCH:
-            if self.net.has_node(src_dpid):
+        # deal with topology in lldp packet
+        if len(infos) == 3:
+            # deal with delete
+            if infos[2].tlv_info == DELETE_SWITCH:
                 if self.net.has_node(src_dpid):
+                    # delete the node from topology
                     self.net.remove_node(src_dpid)
-                    # self.delete_flow(datapath, src_dpid)
                     print "delete node ", src_dpid, "current topo", self.net.edges, " current nodes ", self.net.nodes
-
-                for switch in self.switches:
-                    for port in switch.ports.keys():
-                        self.send_lldp(port, src_dpid, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
-            self.update_flow(datapath, msg)
-            return
+                    # flood the lldp package to other network
+                    for switch in self.switches:
+                        for port in switch.ports.keys():
+                            self.send_lldp(port, src_dpid, TOPO_UPDATE_INFO, switch, DELETE_SWITCH)
+                # update the table
+                self.update_flow(datapath, msg)
+                return
+            # update the topo according to the topology in lldp packet
+            else:
+                src_topo = infos[2].tlv_info.split("+")
+                for edge in src_topo:
+                    nodes = edge.split(',')
+                    in_node = eval(nodes[0][1:])
+                    out_node = eval(nodes[1][1:-1])
+                    if not self.net.has_edge(in_node, out_node):
+                        self.net.add_edge(in_node, out_node)
+                        self.net.add_edge(out_node, in_node)
+                        flag = True
+                    # update flow if add new host to topology
+                    if type(in_node) == str or type(out_node) == str:
+                        self.update_flow(datapath, msg)
 
         # new switch come to network
         if src_port_no != TOPO_UPDATE_INFO:
@@ -152,31 +178,7 @@ class myswitch13(app_manager.RyuApp):
 
             print "add new edges normal", src_dpid, dst_dpid, src_port_no, dst_port_no, self.net.edges
 
-            # add switch to switch port
-            if self.switch2_port.has_key(dst_dpid):
-                self.switch2_port[dst_dpid].add(dst_port_no)
-            else:
-                self.switch2_port[dst_dpid] = {dst_port_no}
-
-            if self.switch2_port.has_key(src_dpid):
-                self.switch2_port[src_dpid].add(src_port_no)
-            else:
-                self.switch2_port[src_dpid] = {src_port_no}
-
-        #update the topo
-        if len(infos) == 3:
-            src_topo = infos[2].tlv_info.split("+")
-            for edge in src_topo:
-                nodes = edge.split(',')
-                in_node = eval(nodes[0][1:])
-                out_node = eval(nodes[1][1:-1])
-                if not self.net.has_edge(in_node, out_node):
-                    self.net.add_edge(in_node, out_node)
-                    flag = True
-                if type(in_node) == str or type(out_node) == str:
-                    self.update_flow(datapath, msg)
-
-        #send logic
+        # send lldp packet with topology if topology updated
         if flag:
             # update flow table
             # self.update_flow(datapath, msg)
@@ -185,8 +187,9 @@ class myswitch13(app_manager.RyuApp):
             for switch in self.switches:
                 for port in switch.ports.keys():
                     self.send_lldp(port, switch.id, port, switch, topology)
-                    # self.send_lldp(port, switch.id, TOPO_UPDATE_INFO, switch, topology)
+                    #self.send_lldp(port, switch.id, TOPO_UPDATE_INFO, switch, topology)
 
+    # handle received arp packet
     def arp_handler(self, datapath, dpid, eth, in_port, msg, ofproto, parser, pkt):
         dst = eth.dst
         src = eth.src
@@ -216,7 +219,7 @@ class myswitch13(app_manager.RyuApp):
         else:
             out_port = ofproto.OFPP_FLOOD
         # Add the link between the host and it's switch
-        if src not in self.net and in_port not in self.switch2_port[dpid]:
+        if src not in self.net and in_port not in self.port_to_switch[dpid].keys():
             self.net.add_edge(src, dpid, src_port=-1, dst_port=in_port)
             self.net.add_edge(dpid, src, src_port=in_port, dst_port=-1)
             print "host link added"
@@ -309,7 +312,7 @@ class myswitch13(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # install table miss from switch to controller
+        # install flow entry from switch to controller
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
