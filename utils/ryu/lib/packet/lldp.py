@@ -79,6 +79,7 @@ LLDP_TLV_SYSTEM_DESCRIPTION = 6         # System Description
 LLDP_TLV_SYSTEM_CAPABILITIES = 7        # System Capabilities
 LLDP_TLV_MANAGEMENT_ADDRESS = 8         # Management Address
 LLDP_TLV_TOPOLOGY_INFORMATION = 9
+LLDP_TLV_TIMESTAMP = 10
 LLDP_TLV_ORGANIZATIONALLY_SPECIFIC = 127  # organizationally Specific TLVs
 
 

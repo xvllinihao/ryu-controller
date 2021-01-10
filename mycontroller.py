@@ -173,9 +173,10 @@ class myswitch13(app_manager.RyuApp):
                 out_node = eval(nodes[1][1:-1])
                 if not self.net.has_edge(in_node, out_node):
                     self.net.add_edge(in_node, out_node)
+                    self.net.add_edge(out_node,in_node)
                     flag = True
-                if type(in_node) == str or type(out_node) == str:
-                    self.update_flow(datapath, msg)
+                    if type(in_node) == str or type(out_node) == str:
+                        self.update_flow(datapath, msg)
 
 
 
