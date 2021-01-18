@@ -58,7 +58,6 @@ class myswitch13(app_manager.RyuApp):
         if datapath.id not in self.mac_to_port.keys():
             return
 
-        # TODO: delete this loop, no need to match the dst
         for dst in self.mac_to_port[datapath.id].keys():
             match = parser.OFPMatch(eth_dst=dst)
             mod = parser.OFPFlowMod(
@@ -99,13 +98,6 @@ class myswitch13(app_manager.RyuApp):
                 # install a flow
                 if out_port != ofproto.OFPP_FLOOD:
                     match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-                    # verify if we have a valid buffer_id, if yes avoid to send both
-                    # flow_mod & packet_out
-                    # if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                    #     self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                    #     return
-                    # else:
-                    #     self.add_flow(datapath, 1, match, actions)
                     self.add_flow(datapath, 1, match, actions)
             except Exception as e:
                 print e
